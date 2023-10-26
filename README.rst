@@ -2,7 +2,7 @@
 Crossref API Client
 -------------------
 
-Library with functions to iterate through the Crossref API.
+This library offers a set of functions designed for asynchronous interaction with the Crossref API, allowing for concurrent requests and more efficient data retrieval.
 
 .. image:: https://travis-ci.org/fabiobatalha/crossrefapi.svg?branch=master
     :target: https://travis-ci.org/fabiobatalha/crossrefapi
@@ -13,7 +13,7 @@ How to Install
 
 .. code-block:: shell
 
-  pip install crossrefapi
+  pip install aiocrossref
 
 ----------
 How to Use
@@ -27,11 +27,11 @@ Agency
 
 .. code-block:: python
 
-  In [1]: from crossref.restful import Works
+  In [1]: from aiocrossref.restful import Works
 
   In [2]: works = Works()
 
-  In [3]: works.agency('10.1590/0102-311x00133115')
+  In [3]: await works.agency('10.1590/0102-311x00133115')
   Out[3]:
   {'DOI': '10.1590/0102-311x00133115',
    'agency': {'id': 'crossref', 'label': 'CrossRef'}}
@@ -41,11 +41,11 @@ Sample
 
 .. code-block:: python
 
-  In [1]: from crossref.restful import Works
+  In [1]: from aiocrossref.restful import Works
 
   In [2]: works = Works()
 
-  In [3]: for item in works.sample(2):
+  In [3]: for item in await works.sample(2):
      ...:     print(item['title'])
      ...:
   ['On the Origin of the Color-Magnitude Relation in the Virgo Cluster']
@@ -59,11 +59,11 @@ See valid parameters in :code:`Works.FIELDS_QUERY`
 
 .. code-block:: python
 
-  In [1]: from crossref.restful import Works
+  In [1]: from aiocrossref.restful import Works
 
   In [2]: works = Works()
 
-  In [3]: w1 = works.query(bibliographic='zika', author='johannes', publisher_name='Wiley-Blackwell')
+  In [3]: w1 = await await works.query(bibliographic='zika', author='johannes', publisher_name='Wiley-Blackwell')
 
   In [4]: for item in w1:
      ...:     print(item['title'])
@@ -77,11 +77,11 @@ Doi
 
 .. code-block:: python
 
-  In [1]: from crossref.restful import Works
+  In [1]: from aiocrossref.restful import Works
 
   In [2]: works = Works()
 
-  In [3]: works.doi('10.1590/0102-311x00133115')
+  In [3]: await works.doi('10.1590/0102-311x00133115')
   Out[3]:
   {'DOI': '10.1590/0102-311x00133115',
    'ISSN': ['0102-311X'],
@@ -134,7 +134,7 @@ See valid parameters in :code:`Works.FILTER_VALIDATOR`. Replace :code:`.` with :
 
   In [2]: works = Works()
   
-  In [3]: for i in works.filter(license__url='https://creativecommons.org/licenses/by', from_pub_date='2016').sample(5).select('title'):
+  In [3]: for i in await (await (await works.filter(license__url='https://creativecommons.org/licenses/by', from_pub_date='2016')).sample(5)).select('title'):
      ...: print(i)
      ...:
   {'title': ['Vers une économie circulaire... de proximité ? Une spatialité à géométrie variable']}
@@ -150,11 +150,11 @@ See valid parameters in :code:`Works.FIELDS_SELECT`
 
 .. code-block:: python
 
-    In [1]: from crossref.restful import Works
+    In [1]: from aiocrossref.restful import Works
 
     In [2]: works = Works()
 
-    In [3]: for i in works.filter(has_funder='true', has_license='true').sample(5).select('DOI, prefix'):
+    In [3]: for i in await  (await (await works.filter(has_funder='true', has_license='true')).sample(5)).select('DOI, prefix'):
        ...:     print(i)
        ...:
     {'DOI': '10.1111/str.12144', 'member': 'http://id.crossref.org/member/311', 'prefix': '10.1111'}
@@ -163,7 +163,7 @@ See valid parameters in :code:`Works.FIELDS_SELECT`
     {'DOI': '10.1007/s10528-015-9707-8', 'member': 'http://id.crossref.org/member/297', 'prefix': '10.1007'}
     {'DOI': '10.1016/j.powtec.2016.04.009', 'member': 'http://id.crossref.org/member/78', 'prefix': '10.1016'}
 
-    In [4]: for i in works.filter(has_funder='true', has_license='true').sample(5).select(['DOI', 'prefix']):
+    In [4]: for i in await (await (await works.filter(has_funder='true', has_license='true')).sample(5)).select(['DOI', 'prefix']):
        ...:     print(i)
        ...:
     {'DOI': '10.1002/jgrd.50059', 'member': 'http://id.crossref.org/member/311', 'prefix': '10.1002'}
@@ -172,7 +172,7 @@ See valid parameters in :code:`Works.FIELDS_SELECT`
     {'DOI': '10.1016/j.triboint.2015.01.023', 'member': 'http://id.crossref.org/member/78', 'prefix': '10.1016'}
     {'DOI': '10.1007/s10854-016-4649-4', 'member': 'http://id.crossref.org/member/297', 'prefix': '10.1007'}
 
-    In [5]: for i in works.filter(has_funder='true', has_license='true').sample(5).select('DOI').select('prefix'):
+    In [5]: for i in await (await (await (await works.filter(has_funder='true', has_license='true')).sample(5)).select('DOI')).select('prefix'):
        ...:     print(i)
        ...:
     {'DOI': '10.1002/mrm.25790', 'member': 'http://id.crossref.org/member/311', 'prefix': '10.1002'}
@@ -181,7 +181,7 @@ See valid parameters in :code:`Works.FIELDS_SELECT`
     {'DOI': '10.1016/j.archoralbio.2010.11.011', 'member': 'http://id.crossref.org/member/78', 'prefix': '10.1016'}
     {'DOI': '10.1145/3035918.3064012', 'member': 'http://id.crossref.org/member/320', 'prefix': '10.1145'}
 
-    In [6]: for i in works.filter(has_funder='true', has_license='true').sample(5).select('DOI', 'prefix'):
+    In [6]: for i in await (await (works.filter(has_funder='true', has_license='true')).sample(5)).select('DOI', 'prefix'):
        ...:     print(i)
        ...:
     {'DOI': '10.1016/j.cplett.2015.11.062', 'member': 'http://id.crossref.org/member/78', 'prefix': '10.1016'}
@@ -195,11 +195,11 @@ Facet
 
 .. code-block:: python
 
-  In [1]: from crossref.restful import Works, Prefixes
+  In [1]: from aiocrossref.restful import Works, Prefixes
 
   In [2]: works = Works()
 
-  In [3]: works.facet('issn', 10)
+  In [3]: await works.facet('issn', 10)
   Out[3]:
   {'issn': {'value-count': 10,
     'values': {'http://id.crossref.org/issn/0009-2975': 306546,
@@ -215,7 +215,7 @@ Facet
 
   In [4]: prefixes = Prefixes()
 
-  In [5]: prefixes.works('10.1590').facet('issn', 10)
+  In [5]: await (await (prefixes.works('10.1590')).facet('issn', 10))
   Out[5]:
   {'issn': {'value-count': 10,
     'values': {'http://id.crossref.org/issn/0004-282X': 7712,
@@ -229,7 +229,7 @@ Facet
      'http://id.crossref.org/issn/1413-8123': 4658,
      'http://id.crossref.org/issn/1516-3598': 4678}}}
 
-  In [6]: prefixes.works('10.1590').query('zika').facet('issn', 10)
+  In [6]: await (await prefixes.works('10.1590').query('zika')).facet('issn', 10)
   Out[6]:
   {'issn': {'value-count': 10,
     'values': {'http://id.crossref.org/issn/0004-282X': 4,
@@ -250,7 +250,7 @@ Exemplifying the use of API Library to retrieve data from Journals endpoint.
 
 .. code-block:: python
 
-  In [1]: from crossref.restful import Journals
+  In [1]: from aiocrossref.restful import Journals
 
   In [2]: journals = Journals()
 
@@ -323,25 +323,25 @@ Exemplifying the use of API Library to retrieve data from Journals endpoint.
    'publisher': 'SciELO',
    'title': 'Cadernos de Saúde Pública'}
 
-  In [4]: journals.journal_exists('0102-311X')
+  In [4]: await journals.journal_exists('0102-311X')
   Out[4]: True
 
-  In [5]: journals.query('Cadernos').url
+  In [5]: (await journals.query('Cadernos')).url
   Out[5]: 'https://api.crossref.org/journals?query=Cadernos'
 
-  In [6]: journals.query('Cadernos').count()
+  In [6]: await (await journals.query('Cadernos')).count()
   Out[6]: 60
 
-  In [7]: journals.works('0102-311X').query('zika').url
+  In [7]: (await journals.works('0102-311X').query('zika')).url
   Out[7]: 'https://api.crossref.org/journals/0102-311X/works?query=zika'
 
-  In [8]: journals.works('0102-311X').query('zika').count()
+  In [8]: await (await journals.works('0102-311X').query('zika')).count()
   Out[8]: 12
 
-  In [9]: journals.works('0102-311X').query('zika').query(author='Diniz').url
+  In [9]: (await (await journals.works('0102-311X').query('zika')).query(author='Diniz')).url
   Out[9]: 'https://api.crossref.org/journals/0102-311X/works?query.author=Diniz&query=zika'
 
-  In [10]: journals.works('0102-311X').query('zika').query(author='Diniz').count()
+  In [10]: await (await (await (journals.works('0102-311X').query('zika')).query(author='Diniz')).count())
   Out[10]: 1
 
 Base Methods
@@ -356,7 +356,7 @@ This method returns the Crossref API version.
 
 .. code-block:: python
 
-  In [1]: from crossref.restful import Journals
+  In [1]: from aiocrossref.restful import Journals
 
   In [2]: journals = Journals()
 
@@ -371,14 +371,14 @@ and retrieve the value of **total-result** attribute.
 
 .. code-block:: python
 
-  In [1]: from crossref.restful import Works
+  In [1]: from aiocrossref.restful import Works
 
   In [2]: works = Works()
 
-  In [3]: works.query('zika').count()
+  In [3]: await (await works.query('zika')).count()
   Out[3]: 3597
 
-  In [4]: works.query('zika').filter(from_online_pub_date='2017').count()
+  In [4]: await (await (await works.query('zika')).filter(from_online_pub_date='2017')).count()
   Out[4]: 444
 
 Url
@@ -388,46 +388,46 @@ This method returns the url that will be used to query the Crossref API.
 
 .. code-block:: python
 
-  In [1]: from crossref.restful import Works
+  In [1]: from aiocrossref.restful import Works
 
   In [2]: works = Works()
 
-  In [3]: works.query('zika').url
+  In [3]: (await works.query('zika')).url
   Out[3]: 'https://api.crossref.org/works?query=zika'
 
-  In [4]: works.query('zika').filter(from_online_pub_date='2017').url
+  In [4]: (await (await works.query('zika')).filter(from_online_pub_date='2017')).url
   Out[4]: 'https://api.crossref.org/works?query=zika&filter=from-online-pub-date%3A2017'
 
-  In [5]: works.query('zika').filter(from_online_pub_date='2017').query(author='Mari').url
+  In [5]: (await (await (await works.query('zika')).filter(from_online_pub_date='2017')).query(author='Mari')).url
   Out[5]: 'https://api.crossref.org/works?query.author=Mari&filter=from-online-pub-date%3A2017&query=zika'
 
-  In [6]: works.query('zika').filter(from_online_pub_date='2017').query(author='Mari').sort('published').url
+  In [6]: await (await (await (await works.query('zika')).filter(from_online_pub_date='2017')).query(author='Mari')).sort('published').url
   Out[6]: 'https://api.crossref.org/works?query.author=Mari&query=zika&filter=from-online-pub-date%3A2017&sort=published'
 
-  In [7]: works.query('zika').filter(from_online_pub_date='2017').query(author='Mari').sort('published').order('asc').url
+  In [7]: await (await (await (await works.query('zika')).filter(from_online_pub_date='2017')).query(author='Mari')).sort('published').order('asc').url
   Out[7]: 'https://api.crossref.org/works?filter=from-online-pub-date%3A2017&query.author=Mari&order=asc&query=zika&sort=published'
 
-  In [8]: from crossref.restful import Prefixes
+  In [8]: from aiocrossref.restful import Prefixes
 
   In [9]: prefixes = Prefixes()
 
-  In [10]: prefixes.works('10.1590').query('zike').url
+  In [10]: (await (await prefixes.works('10.1590')).query('zike')).url
   Out[10]: 'https://api.crossref.org/prefixes/10.1590/works?query=zike'
 
-  In [11]: from crossref.restful import Journals
+  In [11]: from aiocrossref.restful import Journals
 
   In [12]: journals = Journals()
 
   In [13]: journals.url
   Out[13]: 'https://api.crossref.org/journals'
 
-  In [14]: journals.works('0102-311X').url
+  In [14]: (await journals.works('0102-311X')).url
   Out[14]: 'https://api.crossref.org/journals/0102-311X/works'
 
-  In [15]: journals.works('0102-311X').query('zika').url
+  In [15]: (await (await journals.works('0102-311X')).query('zika')).url
   Out[15]: 'https://api.crossref.org/journals/0102-311X/works?query=zika'
 
-  In [16]: journals.works('0102-311X').query('zika').count()
+  In [16]: await (await (await journals.works('0102-311X')).query('zika')).count()
   Out[16]: 12
 
 All
@@ -441,11 +441,11 @@ API until it is totally consumed.
 
 .. code-block:: python
 
-  In [1]: from crossref.restful import Journals
+  In [1]: from aiocrossref.restful import Journals
 
   In [2]: journals = Journals()
 
-  In [3]: for item in journals.all():
+  In [3]: for item in await journals.all():
      ...:     print(item['title'])
      ...:
   JNSM
@@ -463,7 +463,7 @@ to setup an Etiquette object to be used in the http requests.
 
 .. code-block:: python
 
-    In [1]: from crossref.restful import Works, Etiquette
+    In [1]: from aiocrossref.restful import Works, Etiquette
 
     In [2]: my_etiquette = Etiquette('My Project Name', 'My Project version', 'My Project URL', 'My contact email')
 
@@ -477,7 +477,7 @@ to setup an Etiquette object to be used in the http requests.
 
     In [6]: works = Works(etiquette=my_etiquette)
 
-    In [7]: for i in works.sample(5).select('DOI'):
+    In [7]: for i in await (await works.sample(5)).select('DOI'):
        ...:     print(i)
        ...:
 
@@ -594,13 +594,13 @@ Second! Using the library
 
 .. code-block:: python
 
-  In [1]: from crossref.restful import Depositor
+  In [1]: from aiocrossref.restful import Depositor
 
   In [2]: request_xml = open('tests/fixtures/deposit_xml_sample.xml', 'r').read()
 
   In [3]: depositor = Depositor('your prefix', 'your crossref user', 'your crossref password')
 
-  In [4]: response = depositor.register_doi('testing_20171011', request_xml)
+  In [4]: response = await depositor.register_doi('testing_20171011', request_xml)
 
   In [5]: response.status_code
   Out[5]: 200
@@ -608,27 +608,27 @@ Second! Using the library
   In [6]: response.text
   Out[6]: '\n\n\n\n<html>\n<head><title>SUCCESS</title>\n</head>\n<body>\n<h2>SUCCESS</h2>\n<p>Your batch submission was successfully received.</p>\n</body>\n</html>\n'
 
-  In [7]: response = depositor.request_doi_status_by_filename('testing_20171011.xml')
+  In [7]: response = await depositor.request_doi_status_by_filename('testing_20171011.xml')
 
   In [8]: response.text
   Out[8]: '<?xml version="1.0" encoding="UTF-8"?>\n<doi_batch_diagnostic status="queued">\r\n  <submission_id>1415653976</submission_id>\r\n  <batch_id />\r\n</doi_batch_diagnostic>'
 
-  In [9]: response = depositor.request_doi_status_by_filename('testing_20171011.xml')
+  In [9]: response = await depositor.request_doi_status_by_filename('testing_20171011.xml')
 
   In [10]: response.text
   Out[10]: '<?xml version="1.0" encoding="UTF-8"?>\n<doi_batch_diagnostic status="queued">\r\n  <submission_id>1415653976</submission_id>\r\n  <batch_id />\r\n</doi_batch_diagnostic>'
 
-  In [11]: response = depositor.request_doi_status_by_filename('testing_20171011.xml', data_type='result')
+  In [11]: response = await depositor.request_doi_status_by_filename('testing_20171011.xml', data_type='result')
 
   In [12]: response.text
   Out[12]: '<?xml version="1.0" encoding="UTF-8"?>\n<doi_batch_diagnostic status="queued">\r\n  <submission_id>1415653976</submission_id>\r\n  <batch_id />\r\n</doi_batch_diagnostic>'
 
-  In [13]: response = depositor.request_doi_status_by_filename('testing_20171011.xml', data_type='contents')
+  In [13]: response = await depositor.request_doi_status_by_filename('testing_20171011.xml', data_type='contents')
 
   In [14]: response.text
   Out[14]: '<?xml version=\'1.0\' encoding=\'utf-8\'?>\n<doi_batch xmlns:jats="http://www.ncbi.nlm.nih.gov/JATS1" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="http://www.crossref.org/schema/4.4.0" version="4.4.0" xsi:schemaLocation="http://www.crossref.org/schema/4.4.0 http://www.crossref.org/schemas/crossref4.4.0.xsd">\n  <head>\n    <doi_batch_id>c5473e12dc8e4f36a40f76f8eae15280</doi_batch_id>\n    <timestamp>20171009132847</timestamp>\n    <depositor>\n      <depositor_name>SciELO</depositor_name>\n      <email_address>crossref@scielo.org</email_address>\n    </depositor>\n    <registrant>SciELO</registrant>\n  </head>\n  <body>\n    <journal>\n      <journal_metadata>\n        <full_title>Revista Brasileira de Ciência Avícola</full_title>\n        <abbrev_title>Rev. Bras. Cienc. Avic.</abbrev_title>\n        <issn media_type="electronic">1516-635X</issn>\n      </journal_metadata>\n      <journal_issue>\n        <publication_date media_type="print">\n          <month>09</month>\n          <year>2017</year>\n        </publication_date>\n        <journal_volume>\n          <volume>19</volume>\n        </journal_volume>\n        <issue>3</issue>\n      </journal_issue>\n      <journal_article publication_type="full_text" reference_distribution_opts="any">\n        <titles>\n          <title>Climatic Variation: Effects on Stress Levels, Feed Intake, and Bodyweight of Broilers</title>\n        </titles>\n        <contributors>\n          <person_name contributor_role="author" sequence="first">\n            <given_name>R</given_name>\n            <surname>Osti</surname>\n            <affiliation>Huazhong Agricultural University,  China</affiliation>\n          </person_name>\n          <person_name contributor_role="author" sequence="additional">\n            <given_name>D</given_name>\n            <surname>Bhattarai</surname>\n            <affiliation>Huazhong Agricultural University,  China</affiliation>\n          </person_name>\n          <person_name contributor_role="author" sequence="additional">\n            <given_name>D</given_name>\n            <surname>Zhou</surname>\n            <affiliation>Huazhong Agricultural University,  China</affiliation>\n          </person_name>\n        </contributors>\n        <publication_date media_type="print">\n          <month>09</month>\n          <year>2017</year>\n        </publication_date>\n        <pages>\n          <first_page>489</first_page>\n          <last_page>496</last_page>\n        </pages>\n        <publisher_item>\n          <identifier id_type="pii">S1516-635X2017000300489</identifier>\n        </publisher_item>\n</doi_batch>'
 
-  In [15]: response = depositor.request_doi_status_by_filename('testing_20171011.xml', data_type='result')
+  In [15]: response = await depositor.request_doi_status_by_filename('testing_20171011.xml', data_type='result')
 
   In [16]: response.text
   Out[16]:

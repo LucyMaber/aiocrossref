@@ -1,9 +1,11 @@
 from __future__ import annotations
+import asyncio
+import aiohttp
 
 import contextlib
 import typing
 from time import sleep
-
+import json
 import requests
 
 from crossref import VERSION, validators
@@ -13,6 +15,19 @@ MAXOFFSET = 10000
 FACETS_MAX_LIMIT = 1000
 
 API = "api.crossref.org"
+
+
+class Response:
+    def __init__(self, status, buffer_response, headers=None):
+        self.status = status
+        self.buffer_response = buffer_response
+        self.headers = headers
+
+    def json(self):
+        return json.loads(self.buffer_response)
+
+    def text(self):
+        return self.buffer_response
 
 
 class CrossrefAPIError(Exception):
@@ -31,15 +46,22 @@ class HTTPRequest:
 
     def __init__(self, throttle=True):
         self.throttle = throttle
-        self.rate_limits = {"x-rate-limit-limit": 50, "x-rate-limit-interval": 1}
+        self.rate_limits = {"x-rate-limit-limit": 50,
+                            "x-rate-limit-interval": 1}
+        # self.session = aiohttp.ClientSession()
 
-    def _update_rate_limits(self, headers):
+    async def close(self):
+        pass
+        # await self.session.close()
+
+    async def _update_rate_limits(self, headers):
+        with contextlib.suppress(ValueError):
+            self.rate_limits["x-rate-limit-limit"] = int(
+                headers.get("x-rate-limit-limit", 50))
 
         with contextlib.suppress(ValueError):
-            self.rate_limits["x-rate-limit-limit"] = int(headers.get("x-rate-limit-limit", 50))
-
-        with contextlib.suppress(ValueError):
-            interval_value = int(headers.get("x-rate-limit-interval", "1s")[:-1])
+            interval_value = int(headers.get(
+                "x-rate-limit-interval", "1s")[:-1])
 
         interval_scope = headers.get("x-rate-limit-interval", "1s")[-1]
 
@@ -55,7 +77,7 @@ class HTTPRequest:
     def throttling_time(self):
         return self.rate_limits["x-rate-limit-interval"] / self.rate_limits["x-rate-limit-limit"]
 
-    def do_http_request(  # noqa: PLR0913
+    async def do_http_request(
             self,
             method,
             endpoint,
@@ -67,19 +89,25 @@ class HTTPRequest:
     ):
 
         if only_headers is True:
-            return requests.head(endpoint, timeout=2)
+            async with self.session.head(endpoint, timeout=2) as response:
+                return Response(response.status, await response.text(), dict(response.headers))
+        async with aiohttp.ClientSession() as session:
+            action = session.post if method == "post" else session.get
+            print(action)
+            print(endpoint)
 
-        action = requests.post if method == "post" else requests.get
-
-        headers = custom_header if custom_header else {"user-agent": str(Etiquette())}
-        if method == "post":
-            result = action(endpoint, data=data, files=files, timeout=timeout, headers=headers)
-        else:
-            result = action(endpoint, params=data, timeout=timeout, headers=headers)
+            headers = custom_header if custom_header else {
+                "user-agent": str(Etiquette())}
+            if method == "post":
+                async with action(endpoint, data=data, files=files, timeout=timeout, headers=headers) as response:
+                    return Response(response.status, await response.text(), dict(response.headers))
+            else:
+                async with action(endpoint, params=data, timeout=timeout, headers=headers) as response:
+                    return Response(response.status, await response.text(), dict(response.headers))
 
         if self.throttle is True:
-            self._update_rate_limits(result.headers)
-            sleep(self.throttling_time)
+            await self._update_rate_limits(result.headers)
+            await asyncio.sleep(self.throttling_time)
 
         return result
 
@@ -113,10 +141,11 @@ class Etiquette:
         )
 
 
-class Endpoint:
+class Endpoint(HTTPRequest):
+
     CURSOR_AS_ITER_METHOD = False
 
-    def __init__( # noqa: PLR0913
+    def __init__(
             self,
             request_url=None,
             request_params=None,
@@ -126,22 +155,27 @@ class Endpoint:
             crossref_plus_token=None,
             timeout=30,
     ):
-        self.do_http_request = HTTPRequest(throttle=throttle).do_http_request
         self.etiquette = etiquette or Etiquette()
         self.custom_header = {"user-agent": str(self.etiquette)}
         self.crossref_plus_token = crossref_plus_token
         if crossref_plus_token:
             self.custom_header["Crossref-Plus-API-Token"] = self.crossref_plus_token
-        self.request_url = request_url or build_url_endpoint(self.ENDPOINT, context)
+        self.request_url = request_url or build_url_endpoint(
+            self.ENDPOINT, context)
         self.request_params = request_params or {}
         self.context = context or ""
         self.timeout = timeout
+        self.throttle = throttle
+        # self.session = aiohttp.ClientSession()
 
-    @property
-    def _rate_limits(self):
+    async def close(self):
+        pass
+        # await self.session.close()
+
+    async def _rate_limits(self):
         request_url = str(self.request_url)
 
-        result = self.do_http_request(
+        result = await self.do_http_request(
             "get",
             request_url,
             only_headers=True,
@@ -155,7 +189,7 @@ class Endpoint:
             "x-rate-limit-interval": result.headers.get("x-rate-limit-interval", "undefined"),
         }
 
-    def _escaped_pagging(self):
+    async def _escaped_pagging(self):
         escape_pagging = ["offset", "rows"]
         request_params = dict(self.request_params)
 
@@ -165,54 +199,50 @@ class Endpoint:
 
         return request_params
 
-    @property
-    def version(self):
+    async def version(self):
         """
-        This attribute retrieve the API version.
+        This attribute retrieves the API version.
 
-        >>> Works().version
+        >>> await Works().version()
         '1.0.0'
         """
         request_params = dict(self.request_params)
         request_url = str(self.request_url)
 
-        result = self.do_http_request(
+        result = await self.do_http_request(
             "get",
             request_url,
             data=request_params,
             custom_header=self.custom_header,
             timeout=self.timeout,
-        ).json()
+        )
+        result_json = result.json()
 
-        return result["message-version"]
+        return result_json["message-version"]
 
-    @property
-    def x_rate_limit_limit(self):
+    async def x_rate_limit_limit(self):
+        return (await self._rate_limits())["x-rate-limit-limit"]
 
-        return self._rate_limits.get("x-rate-limit-limit", "undefined")
+    async def x_rate_limit_interval(self):
+        return (await self._rate_limits())["x-rate-limit-interval"]
 
-    @property
-    def x_rate_limit_interval(self):
-
-        return self._rate_limits.get("x-rate-limit-interval", "undefined")
-
-    def count(self):
+    async def count(self):
         """
-        This method retrieve the total of records resulting from a given query.
+        This method retrieves the total number of records resulting from a given query.
 
-        This attribute can be used compounded with query, filter,
-        sort, order and facet methods.
+        This attribute can be used in combination with query, filter,
+        sort, order, and facet methods.
 
         Examples:
             >>> from crossref.restful import Works
-            >>> Works().query('zika').count()
+            >>> await Works().query('zika').count()
             3597
-            >>> Works().query('zika').filter(prefix='10.1590').count()
+            >>> await Works().query('zika').filter(prefix='10.1590').count()
             61
-            >>> Works().query('zika').filter(prefix='10.1590').sort('published') \
+            >>> await Works().query('zika').filter(prefix='10.1590').sort('published') \
                 .order('desc').filter(has_abstract='true').count()
             14
-            >>> Works().query('zika').filter(prefix='10.1590').sort('published') \
+            >>> await Works().query('zika').filter(prefix='10.1590').sort('published') \
                 .order('desc').filter(has_abstract='true').query(author='Marli').count()
             1
         """
@@ -220,71 +250,70 @@ class Endpoint:
         request_url = str(self.request_url)
         request_params["rows"] = 0
 
-        result = self.do_http_request(
+        result = await self.do_http_request(
             "get",
             request_url,
             data=request_params,
             custom_header=self.custom_header,
             timeout=self.timeout,
-        ).json()
+        )
+        result_json = result.json()
 
-        return int(result["message"]["total-results"])
+        return int(result_json["message"]["total-results"])
 
-    @property
-    def url(self):
+    async def url(self):
         """
-        This attribute retrieve the url that will be used as a HTTP request to
+        This attribute retrieves the URL that will be used as an HTTP request to
         the Crossref API.
 
-        This attribute can be used compounded with query, filter,
-        sort, order and facet methods.
+        This attribute can be used in combination with query, filter,
+        sort, order, and facet methods.
 
         Examples:
             >>> from crossref.restful import Works
-            >>> Works().query('zika').url
+            >>> await Works().query('zika').url()
             'https://api.crossref.org/works?query=zika'
-            >>> Works().query('zika').filter(prefix='10.1590').url
+            >>> await Works().query('zika').filter(prefix='10.1590').url()
             'https://api.crossref.org/works?query=zika&filter=prefix%3A10.1590'
-            >>> Works().query('zika').filter(prefix='10.1590').sort('published') \
-                .order('desc').url
+            >>> await Works().query('zika').filter(prefix='10.1590').sort('published') \
+                .order('desc').url()
             'https://api.crossref.org/works?sort=published
             &order=desc&query=zika&filter=prefix%3A10.1590'
-            >>> Works().query('zika').filter(prefix='10.1590').sort('published') \
-                .order('desc').filter(has_abstract='true').query(author='Marli').url
+            >>> await Works().query('zika').filter(prefix='10.1590').sort('published') \
+                .order('desc').filter(has_abstract='true').query(author='Marli').url()
             'https://api.crossref.org/works?sort=published
             &filter=prefix%3A10.1590%2Chas-abstract%3Atrue&query=zika&order=desc&query.author=Marli'
         """
-        request_params = self._escaped_pagging()
+        request_params = await self._escaped_pagging()
 
-        sorted_request_params = sorted([(k, v) for k, v in request_params.items()])
-        req = requests.Request("get", self.request_url, params=sorted_request_params).prepare()
+        sorted_request_params = sorted(
+            [(k, v) for k, v in request_params.items()])
 
-        return req.url
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                    self.request_url, params=sorted_request_params) as response:
+                req_url = response.url
 
-    def all(self, request_params: dict | None):  # noqa: A003
+        return req_url
+
+    async def all(self, request_params=None):
         context = str(self.context)
         request_url = build_url_endpoint(self.ENDPOINT, context)
 
         if request_params is None:
             request_params = {}
 
-        return iter(
-            self.__class__(
-                request_url=request_url,
-                request_params=request_params,
-                context=context,
-                etiquette=self.etiquette,
-                crossref_plus_token=self.crossref_plus_token,
-                timeout=self.timeout,
-            ),
-        )
+        async with aiohttp.ClientSession() as session:
+            async with session.get(request_url, params=request_params, headers=self.custom_header) as response:
+                result = await response.json()
+        return result
 
-    def __iter__(self): # noqa: PLR0912 - To many branches is not a problem.
+    async def __aiter__(self):
         request_url = str(self.request_url)
 
         if "sample" in self.request_params:
-            request_params = self._escaped_pagging()
-            result = self.do_http_request(
+            request_params = await self._escaped_pagging()
+            result = await self.do_http_request(
                 "get",
                 self.request_url,
                 data=request_params,
@@ -292,12 +321,12 @@ class Endpoint:
                 timeout=self.timeout,
             )
 
-            if result.status_code == 404:
+            if result.status == 404:
                 return
 
-            result = result.json()
+            result_json = result.json()
 
-            for item in result["message"]["items"]:
+            for item in result_json["message"]["items"]:
                 yield item
 
             return
@@ -307,7 +336,7 @@ class Endpoint:
             request_params["cursor"] = "*"
             request_params["rows"] = LIMIT
             while True:
-                result = self.do_http_request(
+                result = await self.do_http_request(
                     "get",
                     request_url,
                     data=request_params,
@@ -315,24 +344,24 @@ class Endpoint:
                     timeout=self.timeout,
                 )
 
-                if result.status_code == 404:
+                if result.status == 404:
                     return
 
-                result = result.json()
+                result_json = result.json()
 
-                if len(result["message"]["items"]) == 0:
+                if len(result_json["message"]["items"]) == 0:
                     return
 
-                for item in result["message"]["items"]:
+                for item in result_json["message"]["items"]:
                     yield item
 
-                request_params["cursor"] = result["message"]["next-cursor"]
+                request_params["cursor"] = result_json["message"]["next-cursor"]
         else:
             request_params = dict(self.request_params)
             request_params["offset"] = 0
             request_params["rows"] = LIMIT
             while True:
-                result = self.do_http_request(
+                result = await self.do_http_request(
                     "get",
                     request_url,
                     data=request_params,
@@ -340,21 +369,21 @@ class Endpoint:
                     timeout=self.timeout,
                 )
 
-                if result.status_code == 404:
+                if result.status == 404:
                     return
 
-                result = result.json()
+                result_json = result.json()
 
-                if len(result["message"]["items"]) == 0:
+                if len(result_json["message"]["items"]) == 0:
                     return
 
-                for item in result["message"]["items"]:
+                for item in result_json["message"]["items"]:
                     yield item
 
                 request_params["offset"] += LIMIT
 
                 if request_params["offset"] >= MAXOFFSET:
-                    msg = "Offset exceded the max offset of %d"
+                    msg = "Offset exceeded the max offset of %d"
                     raise MaxOffsetError(msg, MAXOFFSET)
 
 
@@ -562,135 +591,24 @@ class Works(Endpoint):
         "update-type": None,
     }
 
-    def order(self, order="asc"):
-        """
-        This method retrieve an iterable object that implements the method
-        __iter__. The arguments given will compose the parameters in the
-        request url.
-
-        This method can be used compounded with query, filter,
-        sort and facet methods.
-
-        kwargs: valid SORT_VALUES arguments.
-
-        return: iterable object of Works metadata
-
-        Example 1:
-            >>> from crossref.restful import Works
-            >>> works.query('zika').sort('deposited').order('asc').url
-            'https://api.crossref.org/works?sort=deposited&query=zika&order=asc'
-            >>> query = works.query('zika').sort('deposited').order('asc')
-            >>> for item in query:
-            ...    print(item['title'], item['deposited']['date-time'])
-            ...
-            ['A Facile Preparation of ... an-1-one'] 2007-02-13T20:56:13Z
-            ['Contributions to the F  ... Vermont, III'] 2007-02-13T20:56:13Z
-            ['Pilularia americana A. Braun in Klamath County, Oregon'] 2007-02-13T20:56:13Z
-            ...
-
-        Example 2:
-            >>> from crossref.restful import Works
-            >>> works.query('zika').sort('deposited').order('desc').url
-            'https://api.crossref.org/works?sort=deposited&query=zika&order=desc'
-            >>> query = works.query('zika').sort('deposited').order('desc')
-            >>> for item in query:
-            ...    print(item['title'], item['deposited']['date-time'])
-            ...
-            ["Planning for the unexpected: ... , Zika virus, what's next?"] 2017-05-29T12:55:53Z
-            ['Sensitivity of RT-PCR method ... or competence studies'] 2017-05-29T12:53:54Z
-            ['Re-evaluation of routine den ... a of Zika virus emergence'] 2017-05-29T10:46:11Z
-            ...
-        """
-
+    async def order(self, order="asc"):
         context = str(self.context)
         request_url = build_url_endpoint(self.ENDPOINT, context)
         request_params = dict(self.request_params)
 
         if order not in self.ORDER_VALUES:
-            msg = "Sort order specified as {} but must be one of: {}".format(str(order), ", ".join(
-                self.ORDER_VALUES))
-            raise UrlSyntaxError(
-                msg,
-            )
+            msg = "Sort order specified as {} but must be one of: {}".format(
+                str(order), ", ".join(self.ORDER_VALUES))
+            raise UrlSyntaxError(msg)
 
         request_params["order"] = order
 
-        return self.__class__(
-            request_url=request_url,
-            request_params=request_params,
-            context=context,
-            etiquette=self.etiquette,
-            timeout=self.timeout,
-        )
+        async with aiohttp.ClientSession() as session:
+            async with session.get(request_url, params=request_params, headers=self.custom_header) as response:
+                result = await response.json()
+        return result
 
-    def select(self, *args):
-        """
-        This method retrieve an iterable object that implements the method
-        __iter__. The arguments given will compose the parameters in the
-        request url.
-
-        This method can be used compounded with query, filter,
-        sort and facet methods.
-
-        args: valid FIELDS_SELECT arguments.
-
-        return: iterable object of Works metadata
-
-        Example 1:
-            >>> from crossref.restful import Works
-            >>> works = Works()
-            >>> for i in works.filter(has_funder='true', has_license='true') \
-                .sample(5).select('DOI, prefix'):
-            ...     print(i)
-            ...
-            {'DOI': '10.1016/j.jdiacomp.2016.06.005', 'prefix': '10.1016'}
-            {'DOI': '10.1016/j.mssp.2015.07.076', 'prefix': '10.1016'}
-            {'DOI': '10.1002/slct.201700168', 'prefix': '10.1002'}
-            {'DOI': '10.1016/j.actbio.2017.01.034', 'prefix': '10.1016'}
-            {'DOI': '10.1016/j.optcom.2013.11.013', 'prefix': '10.1016'}
-            ...
-        Example 2:
-            >>> from crossref.restful import Works
-            >>> works = Works()
-
-            >>> for i in works.filter(has_funder='true', has_license='true') \
-                .sample(5).select('DOI').select('prefix'):
-            >>>     print(i)
-            ...
-            {'DOI': '10.1016/j.sajb.2016.03.010', 'prefix': '10.1016'}
-            {'DOI': '10.1016/j.jneumeth.2009.08.017', 'prefix': '10.1016'}
-            {'DOI': '10.1016/j.tetlet.2016.05.058', 'prefix': '10.1016'}
-            {'DOI': '10.1007/s00170-017-0689-z', 'prefix': '10.1007'}
-            {'DOI': '10.1016/j.dsr.2016.03.004', 'prefix': '10.1016'}
-            ...
-        Example: 3:
-            >>> from crossref.restful import Works
-            >>> works = Works()
-            >>>: for i in works.filter(has_funder='true', has_license='true') \
-                .sample(5).select(['DOI', 'prefix']):
-            >>>      print(i)
-            ...
-            {'DOI': '10.1111/zoj.12146', 'prefix': '10.1093'}
-            {'DOI': '10.1016/j.bios.2014.04.018', 'prefix': '10.1016}
-            {'DOI': '10.1016/j.cej.2016.10.011', 'prefix': '10.1016'}
-            {'DOI': '10.1016/j.dci.2017.08.001', 'prefix': '10.1016'}
-            {'DOI': '10.1016/j.icheatmasstransfer.2016.09.012', 'prefix': '10.1016'}
-            ...
-        Example: 4:
-            >>> from crossref.restful import Works
-            >>> works = Works()
-            >>>: for i in works.filter(has_funder='true', has_license='true') \
-                .sample(5).select('DOI', 'prefix'):
-            >>>      print(i)
-            ...
-            {'DOI': '10.1111/zoj.12146', 'prefix': '10.1093'}
-            {'DOI': '10.1016/j.bios.2014.04.018', 'prefix': '10.1016'}
-            {'DOI': '10.1016/j.cej.2016.10.011', 'prefix': '10.1016'}
-            {'DOI': '10.1016/j.dci.2017.08.001', 'prefix': '10.1016'}
-            {'DOI': '10.1016/j.icheatmasstransfer.2016.09.012', 'prefix': '10.1016'}
-            ...
-        """
-
+    async def select(self, *args):
         context = str(self.context)
         request_url = build_url_endpoint(self.ENDPOINT, context)
         request_params = dict(self.request_params)
@@ -710,63 +628,19 @@ class Works(Endpoint):
         if len(invalid_select_args) != 0:
             msg = "Select field's specified as ({}) but must be one of: {}".format(
                 ", ".join(invalid_select_args), ", ".join(self.FIELDS_SELECT))
-            raise UrlSyntaxError(
-                msg,
-            )
+            raise UrlSyntaxError(msg)
 
         request_params["select"] = ",".join(
             sorted(
                 [i for i in set(request_params.get("select", "").split(",") + select_args) if i]),
         )
 
-        return self.__class__(
-            request_url=request_url,
-            request_params=request_params,
-            context=context,
-            etiquette=self.etiquette,
-            timeout=self.timeout,
-        )
+        async with aiohttp.ClientSession() as session:
+            async with session.get(request_url, params=request_params, headers=self.custom_header) as response:
+                result = await response.json()
+        return result
 
-    def sort(self, sort="score"):
-        """
-        This method retrieve an iterable object that implements the method
-        __iter__. The arguments given will compose the parameters in the
-        request url.
-
-        This method can be used compounded with query, filter,
-        order and facet methods.
-
-        kwargs: valid SORT_VALUES arguments.
-
-        return: iterable object of Works metadata
-
-        Example 1:
-            >>> from crossref.restful import Works
-            >>> works = Works()
-            >>> query = works.sort('deposited')
-            >>> for item in query:
-            ...     print(item['title'])
-            ...
-            ['Integralidade e transdisciplinaridade em ... multiprofissionais na saúde coletiva']
-            ['Aprendizagem em grupo operativo de diabetes: uma abordagem etnográfica']
-            ['A rotatividade de enfermeiros e médicos: ... da Estratégia de Saúde da Família']
-            ...
-
-        Example 2:
-            >>> from crossref.restful import Works
-            >>> works = Works()
-            >>> query = works.sort('relevance')
-            >>> for item in query:
-            ...     print(item['title'])
-            ...
-            ['Proceedings of the American Physical Society']
-            ['Annual Meeting of the Research Society on Alcoholism']
-            ['Local steroid injections: ... hip and on the letter by Swezey']
-            ['Intraventricular neurocytoma']
-            ['Mammography accreditation']
-            ['Temporal lobe necrosis in nasopharyngeal carcinoma: Pictorial essay']
-            ...
-        """
+    async def sort(self, sort="score"):
         context = str(self.context)
         request_url = build_url_endpoint(self.ENDPOINT, context)
         request_params = dict(self.request_params)
@@ -774,13 +648,11 @@ class Works(Endpoint):
         if sort not in self.SORT_VALUES:
             msg = "Sort field specified as {} but must be one of: {}".format(str(sort), ", ".join(
                 self.SORT_VALUES))
-            raise UrlSyntaxError(
-                msg,
-            )
+            raise UrlSyntaxError(msg)
 
         request_params["sort"] = sort
 
-        return self.__class__(
+        return await self.__class__.create(
             request_url=request_url,
             request_params=request_params,
             context=context,
@@ -788,31 +660,7 @@ class Works(Endpoint):
             timeout=self.timeout,
         )
 
-    def filter(self, **kwargs):  # noqa: A003
-        """
-        This method retrieve an iterable object that implements the method
-        __iter__. The arguments given will compose the parameters in the
-        request url.
-
-        This method can be used compounded and recursively with query, filter,
-        order, sort and facet methods.
-
-        kwargs: valid FILTER_VALIDATOR arguments. Replace `.` with `__` and
-        `-` with `_` when using parameters.
-
-        return: iterable object of Works metadata
-
-        Example:
-            >>> from crossref.restful import Works
-            >>> works = Works()
-            >>> query = works.filter(has_funder='true', has_license='true')
-            >>> for item in query:
-            ...     print(item['title'])
-            ...
-            ['Design of smiling-face-shaped band-notched UWB antenna']
-            ['Phase I clinical and pharmacokinetic ... tients with advanced solid tumors']
-            ...
-        """
+    async def filter(self, **kwargs):
         context = str(self.context)
         request_url = build_url_endpoint(self.ENDPOINT, context)
         request_params = dict(self.request_params)
@@ -825,9 +673,7 @@ class Works(Endpoint):
                     f" this route. Valid filters for this route"
                     f" are: {', '.join(self.FILTER_VALIDATOR.keys())}"
                 )
-                raise UrlSyntaxError(
-                    msg,
-                )
+                raise UrlSyntaxError(msg)
 
             if self.FILTER_VALIDATOR[decoded_fltr] is not None:
                 self.FILTER_VALIDATOR[decoded_fltr](str(value))
@@ -835,7 +681,8 @@ class Works(Endpoint):
             if "filter" not in request_params:
                 request_params["filter"] = decoded_fltr + ":" + str(value)
             else:
-                request_params["filter"] += "," + decoded_fltr + ":" + str(value)
+                request_params["filter"] += "," + \
+                    decoded_fltr + ":" + str(value)
 
         return self.__class__(
             request_url=request_url,
@@ -845,7 +692,7 @@ class Works(Endpoint):
             timeout=self.timeout,
         )
 
-    def facet(self, facet_name, facet_count=100):
+    async def facet(self, facet_name, facet_count=100):
         context = str(self.context)
         request_url = build_url_endpoint(self.ENDPOINT, context)
         request_params = dict(self.request_params)
@@ -859,63 +706,23 @@ class Works(Endpoint):
                 f" issn, published, source, type-name, license, category-name, relation-type,"
                 f" assertion-group"
             )
-            raise UrlSyntaxError((
-                msg
-            ),
-                ", ".join(self.FACET_VALUES.keys()),
-            )
+            raise UrlSyntaxError((msg), ", ".join(self.FACET_VALUES.keys()))
 
         facet_count = (
             self.FACET_VALUES[facet_name]
             if self.FACET_VALUES[facet_name] is not None
-               and self.FACET_VALUES[facet_name] <= facet_count
+            and self.FACET_VALUES[facet_name] <= facet_count
             else facet_count
         )
 
         request_params["facet"] = f"{facet_name}:{facet_count}"
-        result = self.do_http_request(
-            "get",
-            request_url,
-            data=request_params,
-            custom_header=self.custom_header,
-            timeout=self.timeout,
-        ).json()
+        async with aiohttp.ClientSession() as session:
+            async with session.get(request_url, params=request_params, headers=self.custom_header) as response:
+                result = await response.json()
 
         return result["message"]["facets"]
 
-    def query(self, *args, **kwargs):
-        """
-        This method retrieve an iterable object that implements the method
-        __iter__. The arguments given will compose the parameters in the
-        request url.
-
-        This method can be used compounded and recursively with query, filter,
-        order, sort and facet methods.
-
-        args: strings (String)
-
-        kwargs: valid FIELDS_QUERY arguments.
-
-        return: iterable object of Works metadata
-
-        Example:
-            >>> from crossref.restful import Works
-            >>> works = Works()
-            >>> query = works.query('Zika Virus')
-            >>> query.url
-            'https://api.crossref.org/works?query=Zika+Virus'
-            >>> for item in query:
-            ...     print(item['title'])
-            ...
-            ['Zika Virus']
-            ['Zika virus disease']
-            ['Zika Virus: Laboratory Diagnosis']
-            ['Spread of Zika virus disease']
-            ['Carditis in Zika Virus Infection']
-            ['Understanding Zika virus']
-            ['Zika Virus: History and Infectology']
-            ...
-        """
+    async def query(self, *args, **kwargs):
         context = str(self.context)
         request_url = build_url_endpoint(self.ENDPOINT, context)
         request_params = dict(self.request_params)
@@ -927,116 +734,53 @@ class Works(Endpoint):
             if field not in self.FIELDS_QUERY:
                 msg = (
                     f"Field query {field!s} specified but there is no such field query for"
-                    " this route."
-                    f" Valid field queries for this route are: {', '.join(self.FIELDS_QUERY)}"
+                    " this route. Valid field queries for this route are: {', '.join(self.FIELDS_QUERY)}"
                 )
-                raise UrlSyntaxError(
-                    msg,
-                )
+                raise UrlSyntaxError(msg)
+
             request_params["query.%s" % field.replace("_", "-")] = value
 
-        return self.__class__(request_url=request_url,
-                              request_params=request_params,
-                              context=context,
-                              etiquette=self.etiquette,
-                              timeout=self.timeout)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(request_url, params=request_params, headers=self.custom_header) as response:
+                result = await response.json()
+        return result
 
-    def sample(self, sample_size=20):
-        """
-        This method retrieve an iterable object that implements the method
-        __iter__. The arguments given will compose the parameters in the
-        request url.
+        # return self.__class__(request_url=request_url,
+        #                       request_params=request_params,
+        #                       context=context,
+        #                       etiquette=self.etiquette,
+        #                       timeout=self.timeout,
+        #                       results=result["message"]["items"])
 
-        kwargs: sample_size (Integer) between 0 and 100.
-
-        return: iterable object of Works metadata
-
-        Example:
-            >>> from crossref.restful import Works
-            >>> works = Works()
-            >>> works.sample(2).url
-            'https://api.crossref.org/works?sample=2'
-            >>> [i['title'] for i in works.sample(2)]
-            [['A study on the hemolytic properties ofPrevotella nigrescens'],
-            ['The geometry and the radial ... of carbon nanotubes: beyond the ideal behaviour']]
-        """
+    async def sample(self, sample_size=20):
         context = str(self.context)
         request_url = build_url_endpoint(self.ENDPOINT, context)
         request_params = dict(self.request_params)
 
-        try:
-            if sample_size > 100:
-                msg = (
-                    f"Integer specified as {sample_size!s} but"
-                    " must be a positive integer less than or equal to 100."
-                )
-                raise UrlSyntaxError(msg)  # noqa: TRY301
-        except TypeError as exc:
-            msg = (
-                f"Integer specified as {sample_size!s} but"
-                " must be a positive integer less than or equal to 100."
-            )
-            raise UrlSyntaxError(msg) from exc
+        sample_size = (
+            sample_size
+            if sample_size >= 1 and sample_size <= self.SAMPLE_MAX
+            else self.SAMPLE_MAX
+        )
 
         request_params["sample"] = sample_size
 
-        return self.__class__(
-            request_url=request_url,
-            request_params=request_params,
-            context=context,
-            etiquette=self.etiquette,
-            timeout=self.timeout,
-        )
+        async with aiohttp.ClientSession() as session:
+            async with session.get(request_url, params=request_params, headers=self.custom_header) as response:
+                result = await response.json()
+                return result
 
-    def doi(self, doi, only_message=True):
-        """
-        This method retrieve the DOI metadata related to a given DOI
-        number.
+        # return self.__class__(request_url=request_url,
+        #                       request_params=request_params,
+        #                       context=context,
+        #                       etiquette=self.etiquette,
+        #                       timeout=self.timeout,
+        #                       results=result["message"]["items"])
 
-        args: Crossref DOI id (String)
-
-        return: JSON
-
-        Example:
-            >>> from crossref.restful import Works
-            >>> works = Works()
-            >>> works.doi('10.1590/S0004-28032013005000001')
-            {'is-referenced-by-count': 6, 'reference-count': 216,
-            'DOI': '10.1590/s0004-28032013005000001',
-            'subtitle': [], 'issued': {'date-parts': [[2013, 4, 19]]}, 'source': 'Crossref',
-            'short-container-title': ['Arq. Gastroenterol.'], 'references-count': 216,
-            'short-title': [],
-            'deposited': {'timestamp': 1495911725000, 'date-time': '2017-05-27T19:02:05Z',
-            'date-parts': [[2017, 5, 27]]}, 'ISSN': ['0004-2803'], 'type': 'journal-article',
-            'URL': 'http://dx.doi.org/10.1590/s0004-28032013005000001',
-            'indexed': {'timestamp': 1496034748592, 'date-time': '2017-05-29T05:12:28Z',
-            'date-parts': [[2017, 5, 29]]}, 'content-domain': {'crossmark-restriction': False,
-            'domain': []},
-            'created': {'timestamp': 1374613284000, 'date-time': '2013-07-23T21:01:24Z',
-            'date-parts': [[2013, 7, 23]]}, 'issn-type': [{'value': '0004-2803',
-            'type': 'electronic'}],
-            'page': '81-96', 'volume': '50', 'original-title': [], 'subject': ['Gastroenterology'],
-            'relation': {}, 'container-title': ['Arquivos de Gastroenterologia'], 'member': '530',
-            'prefix': '10.1590', 'published-print': {'date-parts': [[2013, 4, 19]]},
-            'title': ['3rd BRAZILIAN CONSENSUS ON Helicobacter pylori'],
-            'publisher': 'FapUNIFESP (SciELO)', 'alternative-id': ['S0004-28032013000200081'],
-            'abstract': '<jats:p>Significant abstract data.....  .</jats:p>',
-            'author': [{'affiliation': [{'name': 'Universidade Federal de Minas Gerais,  BRAZIL'}],
-            'family': 'Coelho', 'given': 'Luiz Gonzaga'}, {'affiliation': [
-            {'name': 'Universidade Federal do Rio Grande do Sul,  Brazil'}], 'family': 'Maguinilk',
-            'given': 'Ismael'}, {'affiliation': [
-            {'name': 'Presidente de Honra do Núcleo ... para Estudo do Helicobacter,  Brazil'}],
-            'family': 'Zaterka', 'given': 'Schlioma'}, {'affiliation': [
-            {'name': 'Universidade Federal do Piauí,  Brasil'}], 'family': 'Parente',
-             'given': 'José Miguel'},
-            {'affiliation': [{'name': 'Universidade Federal de Minas Gerais,  BRAZIL'}],
-            'family': 'Passos', 'given': 'Maria do Carmo Friche'}, {'affiliation': [
-            {'name': 'Universidade de São Paulo,  Brasil'}], 'family': 'Moraes-Filho',
-            'given': 'Joaquim Prado P.'}], 'score': 1.0, 'issue': '2'}
-        """
+    async def doi(self, doi, only_message=True):
         request_url = build_url_endpoint("/".join([self.ENDPOINT, doi]))
         request_params = {}
-        result = self.do_http_request(
+        result = await self.do_http_request(
             "get",
             request_url,
             data=request_params,
@@ -1044,31 +788,19 @@ class Works(Endpoint):
             timeout=self.timeout,
         )
 
-        if result.status_code == 404:
+        if result.status == 404:
             return None
-        result = result.json()
 
-        return result["message"] if only_message is True else result
+        result =  result.json()
 
-    def agency(self, doi, only_message=True):
-        """
-        This method retrieve the DOI Agency metadata related to a given DOI
-        number.
+        return result["message"] if only_message else result
 
-        args: Crossref DOI id (String)
-
-        return: JSON
-
-        Example:
-            >>> from crossref.restful import Works
-            >>> works = Works()
-            >>> works.agency('10.1590/S0004-28032013005000001')
-            {'DOI': '10.1590/s0004-2...5000001', 'agency': {'label': 'CrossRef', 'id': 'crossref'}}
-        """
-        request_url = build_url_endpoint("/".join([self.ENDPOINT, doi, "agency"]))
+    async def agency(self, doi, only_message=True):
+        request_url = build_url_endpoint(
+            "/".join([self.ENDPOINT, doi, "agency"]))
         request_params = {}
 
-        result = self.do_http_request(
+        result = await self.do_http_request(
             "get",
             request_url,
             data=request_params,
@@ -1076,38 +808,18 @@ class Works(Endpoint):
             timeout=self.timeout,
         )
 
-        if result.status_code == 404:
+        if result.status == 404:
             return None
 
-        result = result.json()
+        result = await result.json()
 
-        return result["message"] if only_message is True else result
+        return result["message"] if only_message else result
 
-    def doi_exists(self, doi):
-        """
-        This method retrieve a boolean according to the existence of a crossref
-        DOI number. It returns False if the API results a 404 status code.
-
-        args: Crossref DOI id (String)
-
-        return: Boolean
-
-        Example 1:
-            >>> from crossref.restful import Works
-            >>> works = Works()
-            >>> works.doi_exists('10.1590/S0004-28032013005000001')
-            True
-
-        Example 2:
-            >>> from crossref.restful import Works
-            >>> works = Works()
-            >>> works.doi_exists('10.1590/S0004-28032013005000001_invalid_doi')
-            False
-        """
+    async def doi_exists(self, doi):
         request_url = build_url_endpoint("/".join([self.ENDPOINT, doi]))
         request_params = {}
 
-        result = self.do_http_request(
+        result = await self.do_http_request(
             "get",
             request_url,
             data=request_params,
@@ -1116,7 +828,7 @@ class Works(Endpoint):
             timeout=self.timeout,
         )
 
-        if result.status_code == 404:
+        if result.status == 404:
             return False
 
         return True
@@ -1129,26 +841,23 @@ class Funders(Endpoint):
 
     FILTER_VALIDATOR: typing.ClassVar[dict] = {"location": None}
 
-    def query(self, *args):
+    async def query(self, *args):
         """
-        This method retrieve an iterable object that implements the method
-        __iter__. The arguments given will compose the parameters in the
-        request url.
+        This method retrieves an iterable object that implements the method
+        __aiter__. The arguments given will compose the parameters in the
+        request URL.
 
         args: Funder ID (Integer)
 
-        return: iterable object of Funders metadata
+        return: asynchronous iterable object of Funders metadata
 
         Example:
             >>> from crossref.restful import Funders
             >>> funders = Funders()
-            >>> funders.query('ABBEY').url
-            'https://api.crossref.org/funders?query=ABBEY'
-            >>> next(iter(funders.query('ABBEY')))
-            {'alt-names': ['Abbey'], 'location': 'United Kingdom', 'replaced-by': [],
-            'replaces': [], 'name': 'ABBEY AWARDS', 'id': '501100000314',
-            'tokens': ['abbey', 'awards', 'abbey'],
-            'uri': 'http://dx.doi.org/10.13039/501100000314'}
+            >>> async for item in funders.query('ABBEY'):
+            ...     print(item['name'], item['location'])
+            ...
+            'Abbey' 'United Kingdom'
         """
         request_url = build_url_endpoint(self.ENDPOINT)
         request_params = dict(self.request_params)
@@ -1156,37 +865,35 @@ class Funders(Endpoint):
         if args:
             request_params["query"] = " ".join([str(i) for i in args])
 
-        return self.__class__(
-            request_url=request_url,
-            request_params=request_params,
-            etiquette=self.etiquette,
-            timeout=self.timeout,
-        )
+        async with aiohttp.ClientSession() as session:
+            async with session.get(request_url, params=request_params) as response:
+                data = await response.json()
 
-    def filter(self, **kwargs):  # noqa: A003
+                for item in data["message"]["items"]:
+                    yield item
+
+    async def filter(self, **kwargs):
         """
-        This method retrieve an iterable object that implements the method
-        __iter__. The arguments given will compose the parameters in the
-        request url.
+        This method retrieves an iterable object that implements the method
+        __aiter__. The arguments given will compose the parameters in the
+        request URL.
 
         This method can be used compounded and recursively with query, filter,
-        order, sort and facet methods.
+        order, sort, and facet methods.
 
         kwargs: valid FILTER_VALIDATOR arguments.
 
-        return: iterable object of Funders metadata
+        return: asynchronous iterable object of Funders metadata
 
         Example:
             >>> from crossref.restful import Funders
             >>> funders = Funders()
-            >>> query = funders.filter(location='Japan')
-            >>> for item in query:
+            >>> async for item in funders.filter(location='Japan'):
             ...     print(item['name'], item['location'])
             ...
-            (u'Central Research Institute, Fukuoka University', u'Japan')
-            (u'Tohoku University', u'Japan')
-            (u'Information-Technology Promotion Agency', u'Japan')
-            ...
+            'Central Research Institute, Fukuoka University' 'Japan'
+            'Tohoku University' 'Japan'
+            'Information-Technology Promotion Agency' 'Japan'
         """
         context = str(self.context)
         request_url = build_url_endpoint(self.ENDPOINT, context)
@@ -1199,9 +906,7 @@ class Funders(Endpoint):
                     f"Filter {decoded_fltr!s} specified but there is no such filter for this route."
                     f" Valid filters for this route are: {', '.join(self.FILTER_VALIDATOR.keys())}"
                 )
-                raise UrlSyntaxError(
-                    msg,
-                )
+                raise UrlSyntaxError(msg)
 
             if self.FILTER_VALIDATOR[decoded_fltr] is not None:
                 self.FILTER_VALIDATOR[decoded_fltr](str(value))
@@ -1209,19 +914,19 @@ class Funders(Endpoint):
             if "filter" not in request_params:
                 request_params["filter"] = decoded_fltr + ":" + str(value)
             else:
-                request_params["filter"] += "," + decoded_fltr + ":" + str(value)
+                request_params["filter"] += "," + \
+                    decoded_fltr + ":" + str(value)
 
-        return self.__class__(
-            request_url=request_url,
-            request_params=request_params,
-            context=context,
-            etiquette=self.etiquette,
-            timeout=self.timeout,
-        )
+        async with aiohttp.ClientSession() as session:
+            async with session.get(request_url, params=request_params) as response:
+                data = await response.json()
 
-    def funder(self, funder_id, only_message=True):
+                for item in data["message"]["items"]:
+                    yield item
+
+    async def funder(self, funder_id, only_message=True):
         """
-        This method retrive a crossref funder metadata related to the
+        This method retrieves crossref funder metadata related to the
         given funder_id.
 
         args: Funder ID (Integer)
@@ -1229,7 +934,7 @@ class Funders(Endpoint):
         Example:
             >>> from crossref.restful import Funders
             >>> funders = Funders()
-            >>> funders.funder('501100000314')
+            >>> await funders.funder('501100000314')
             {'hierarchy': {'501100000314': {}}, 'alt-names': ['Abbey'],
             'work-count': 3, 'replaced-by': [], 'replaces': [],
             'hierarchy-names': {'501100000314': 'ABBEY AWARDS'},
@@ -1237,28 +942,22 @@ class Funders(Endpoint):
             'descendant-work-count': 3, 'descendants': [], 'name': 'ABBEY AWARDS',
             'id': '501100000314', 'tokens': ['abbey', 'awards', 'abbey']}
         """
-        request_url = build_url_endpoint("/".join([self.ENDPOINT, str(funder_id)]))
+        request_url = build_url_endpoint(
+            "/".join([self.ENDPOINT, str(funder_id)]))
         request_params = {}
 
-        result = self.do_http_request(
-            "get",
-            request_url,
-            data=request_params,
-            custom_header=self.custom_header,
-            timeout=self.timeout,
-        )
+        async with aiohttp.ClientSession() as session:
+            async with session.get(request_url, params=request_params) as response:
+                if response.status == 404:
+                    return None
 
-        if result.status_code == 404:
-            return None
+                data = await response.json()
+                return data["message"] if only_message is True else data
 
-        result = result.json()
-
-        return result["message"] if only_message is True else result
-
-    def funder_exists(self, funder_id):
+    async def funder_exists(self, funder_id):
         """
-        This method retrieve a boolean according to the existence of a crossref
-        funder. It returns False if the API results a 404 status code.
+        This method retrieves a boolean according to the existence of a crossref
+        funder. It returns False if the API results in a 404 status code.
 
         args: Crossref Funder id (Integer)
 
@@ -1267,35 +966,29 @@ class Funders(Endpoint):
         Example 1:
             >>> from crossref.restful import Funders
             >>> funders = Funders()
-            >>> funders.funder_exists('501100000314')
+            >>> await funders.funder_exists('501100000314')
             True
 
         Example 2:
             >>> from crossref.restful import Funders
             >>> funders = Funders()
-            >>> funders.funder_exists('999999999999')
+            >>> await funders.funder_exists('999999999999')
             False
         """
-        request_url = build_url_endpoint("/".join([self.ENDPOINT, str(funder_id)]))
+        request_url = build_url_endpoint(
+            "/".join([self.ENDPOINT, str(funder_id)]))
         request_params = {}
 
-        result = self.do_http_request(
-            "get",
-            request_url,
-            data=request_params,
-            only_headers=True,
-            custom_header=self.custom_header,
-            timeout=self.timeout,
-        )
+        async with aiohttp.ClientSession() as session:
+            async with session.head(request_url, params=request_params) as response:
+                if response.status == 404:
+                    return False
 
-        if result.status_code == 404:
-            return False
-
-        return True
+                return True
 
     def works(self, funder_id):
         """
-        This method retrieve a iterable of Works of the given funder.
+        This method retrieves an iterable of Works of the given funder.
 
         args: Crossref allowed document Types (String)
 
@@ -1317,7 +1010,7 @@ class Members(Endpoint):
         "current-doi-count": validators.is_integer,
     }
 
-    def query(self, *args):
+    async def query(self, *args):
         """
         This method retrieve an iterable object that implements the method
         __iter__. The arguments given will compose the parameters in the
@@ -1368,6 +1061,11 @@ class Members(Endpoint):
 
         if args:
             request_params["query"] = " ".join([str(i) for i in args])
+
+        # async with aiohttp.ClientSession() as session:
+        #     async with session.get(request_url, params=request_params, headers=self.custom_header) as response:
+        #         result = await response.json()
+        # return result
 
         return self.__class__(
             request_url=request_url,
@@ -1427,7 +1125,8 @@ class Members(Endpoint):
             if "filter" not in request_params:
                 request_params["filter"] = decoded_fltr + ":" + str(value)
             else:
-                request_params["filter"] += "," + decoded_fltr + ":" + str(value)
+                request_params["filter"] += "," + \
+                    decoded_fltr + ":" + str(value)
 
         return self.__class__(
             request_url=request_url,
@@ -1436,6 +1135,14 @@ class Members(Endpoint):
             etiquette=self.etiquette,
             timeout=self.timeout,
         )
+
+        # return self.__class__(
+        #     request_url=request_url,
+        #     request_params=request_params,
+        #     context=context,
+        #     etiquette=self.etiquette,
+        #     timeout=self.timeout,
+        # )
 
     def member(self, member_id, only_message=True):
         """
@@ -1487,7 +1194,8 @@ class Members(Endpoint):
             ['hogrefe', 'publishing',
             'group'], 'primary-name': 'Hogrefe Publishing Group'}
         """
-        request_url = build_url_endpoint("/".join([self.ENDPOINT, str(member_id)]))
+        request_url = build_url_endpoint(
+            "/".join([self.ENDPOINT, str(member_id)]))
         request_params = {}
 
         result = self.do_http_request(
@@ -1505,7 +1213,7 @@ class Members(Endpoint):
 
         return result["message"] if only_message is True else result
 
-    def member_exists(self, member_id):
+    async def member_exists(self, member_id):
         """
         This method retrieve a boolean according to the existence of a crossref
         member. It returns False if the API results a 404 status code.
@@ -1526,10 +1234,11 @@ class Members(Endpoint):
             >>> members.member_exists(88888)
             False
         """
-        request_url = build_url_endpoint("/".join([self.ENDPOINT, str(member_id)]))
+        request_url = build_url_endpoint(
+            "/".join([self.ENDPOINT, str(member_id)]))
         request_params = {}
 
-        result = self.do_http_request(
+        result = await self.do_http_request(
             "get",
             request_url,
             data=request_params,
@@ -1560,76 +1269,64 @@ class Types(Endpoint):
 
     ENDPOINT = "types"
 
-    def type(self, type_id, only_message=True):  # noqa: A003
+    async def type(self, type_id, only_message=True):
         """
-        This method retrive a crossref document type metadata related to the
+        This method retrieves crossref document type metadata related to the
         given type_id.
 
         args: Crossref allowed document Types (String)
 
         Example:
-            >>> types.type('journal-article')
+            >>> from crossref.restful import Types
+            >>> types = Types()
+            >>> await types.type('journal-article')
             {'label': 'Journal Article', 'id': 'journal-article'}
         """
-        request_url = build_url_endpoint("/".join([self.ENDPOINT, str(type_id)]))
+        request_url = build_url_endpoint(
+            "/".join([self.ENDPOINT, str(type_id)]))
         request_params = {}
 
-        result = self.do_http_request(
-            "get",
-            request_url,
-            data=request_params,
-            custom_header=self.custom_header,
-            timeout=self.timeout,
-        )
+        async with aiohttp.ClientSession() as session:
+            async with session.get(request_url, params=request_params) as response:
+                if response.status == 404:
+                    return None
 
-        if result.status_code == 404:
-            return None
+                data = await response.json()
+                return data["message"] if only_message is True else data
 
-        result = result.json()
-
-        return result["message"] if only_message is True else result
-
-    def all(self):  # noqa: A003
+    async def all(self):
         """
-        This method retrieve an iterator with all the available types.
+        This method retrieves an asynchronous iterator with all the available types.
 
-        return: iterator of crossref document types
+        return: asynchronous iterator of crossref document types
 
         Example:
             >>> from crossref.restful import Types
             >>> types = Types()
-            >>> [i for i in types.all()]
-            [{'label': 'Book Section', 'id': 'book-section'},
-            {'label': 'Monograph', 'id': 'monograph'},
-            {'label': 'Report', 'id': 'report'},
-            {'label': 'Book Track', 'id': 'book-track'},
-            {'label': 'Journal Article', 'id': 'journal-article'},
-            {'label': 'Part', 'id': 'book-part'},
+            >>> async for item in types.all():
+            ...     print(item['label'], item['id'])
             ...
-            }]
+            'Book Section' 'book-section'
+            'Monograph' 'monograph'
+            'Report' 'report'
+            'Book Track' 'book-track'
+            'Journal Article' 'journal-article'
+            'Part' 'book-part'
+            ...
         """
         request_url = build_url_endpoint(self.ENDPOINT, self.context)
         request_params = dict(self.request_params)
 
-        result = self.do_http_request(
-            "get",
-            request_url,
-            data=request_params,
-            custom_header=self.custom_header,
-            timeout=self.timeout,
-        )
+        async with aiohttp.ClientSession() as session:
+            async with session.get(request_url, params=request_params) as response:
+                if response.status == 404:
+                    return
+                data = await response.json()
 
-        if result.status_code == 404:
-            return
-
-        result = result.json()
-
-        yield from result["message"]["items"]
-
-    def type_exists(self, type_id):
+    async def type_exists(self, type_id):
         """
-        This method retrieve a boolean according to the existence of a crossref
-        document type. It returns False if the API results a 404 status code.
+        This method retrieves a boolean according to the existence of a crossref
+        document type. It returns False if the API results in a 404 status code.
 
         args: Crossref allowed document Type (String)
 
@@ -1638,35 +1335,29 @@ class Types(Endpoint):
         Example 1:
             >>> from crossref.restful import Types
             >>> types = Types()
-            >>> types.type_exists('journal-article')
+            >>> await types.type_exists('journal-article')
             True
 
         Example 2:
             >>> from crossref.restful import Types
             >>> types = Types()
-            >>> types.type_exists('unavailable type')
+            >>> await types.type_exists('unavailable type')
             False
         """
-        request_url = build_url_endpoint("/".join([self.ENDPOINT, str(type_id)]))
+        request_url = build_url_endpoint(
+            "/".join([self.ENDPOINT, str(type_id)]))
         request_params = {}
 
-        result = self.do_http_request(
-            "get",
-            request_url,
-            data=request_params,
-            only_headers=True,
-            custom_header=self.custom_header,
-            timeout=self.timeout,
-        )
+        async with aiohttp.ClientSession() as session:
+            async with session.head(request_url, params=request_params) as response:
+                if response.status == 404:
+                    return False
 
-        if result.status_code == 404:
-            return False
-
-        return True
+                return True
 
     def works(self, type_id):
         """
-        This method retrieve a iterable of Works of the given type.
+        This method retrieves an iterable of Works of the given type.
 
         args: Crossref allowed document Types (String)
 
@@ -1681,9 +1372,9 @@ class Prefixes(Endpoint):
 
     ENDPOINT = "prefixes"
 
-    def prefix(self, prefix_id, only_message=True):
+    async def prefix(self, prefix_id, only_message=True):
         """
-        This method retrieve a json with the given Prefix metadata
+        This method retrieves a JSON object with the given Prefix metadata.
 
         args: Crossref Prefix (String)
 
@@ -1692,31 +1383,25 @@ class Prefixes(Endpoint):
         Example:
             >>> from crossref.restful import Prefixes
             >>> prefixes = Prefixes()
-            >>> prefixes.prefix('10.1590')
+            >>> await prefixes.prefix('10.1590')
             {'name': 'FapUNIFESP (SciELO)', 'member': 'http://id.crossref.org/member/530',
             'prefix': 'http://id.crossref.org/prefix/10.1590'}
         """
-        request_url = build_url_endpoint("/".join([self.ENDPOINT, str(prefix_id)]))
+        request_url = build_url_endpoint(
+            "/".join([self.ENDPOINT, str(prefix_id)]))
         request_params = {}
 
-        result = self.do_http_request(
-            "get",
-            request_url,
-            data=request_params,
-            custom_header=self.custom_header,
-            timeout=self.timeout,
-        )
+        async with aiohttp.ClientSession() as session:
+            async with session.get(request_url, params=request_params) as response:
+                if response.status == 404:
+                    return None
 
-        if result.status_code == 404:
-            return None
-
-        result = result.json()
-
-        return result["message"] if only_message is True else result
+                data = await response.json()
+                return data["message"] if only_message is True else data
 
     def works(self, prefix_id):
         """
-        This method retrieve a iterable of Works of the given prefix.
+        This method retrieves an iterable of Works of the given prefix.
 
         args: Crossref Prefix (String)
 
@@ -1731,26 +1416,15 @@ class Journals(Endpoint):
 
     ENDPOINT = "journals"
 
-    def query(self, *args):
+    async def query(self, *args):
         """
-        This method retrieve an iterable object that implements the method
+        This method retrieves an iterable object that implements the method
         __iter__. The arguments given will compose the parameters in the
-        request url.
+        request URL.
 
         args: strings (String)
 
         return: iterable object of Journals metadata
-
-        Example:
-            >>> from crossref.restful import Journals
-            >>> journals = Journals().query('Public Health', 'Health Science')
-            >>> journals.url
-            'https://api.crossref.org/journals?query=Public+Health+Health+Science'
-            >>> next(iter(journals))
-            {'last-status-check-time': None, 'counts': None, 'coverage': None,
-            'publisher': 'ScopeMed International Medical Journal Managment and Indexing System',
-            'flags': None, 'breakdowns': None, 'ISSN': ['2320-4664', '2277-338X'],
-            'title': 'International Journal of Medical Science and Public Health'}
         """
         context = str(self.context)
         request_url = build_url_endpoint(self.ENDPOINT)
@@ -1759,91 +1433,61 @@ class Journals(Endpoint):
         if args:
             request_params["query"] = " ".join([str(i) for i in args])
 
-        return self.__class__(
-            request_url=request_url,
-            request_params=request_params,
-            context=context,
-            etiquette=self.etiquette,
-            timeout=self.timeout,
-        )
+        async with aiohttp.ClientSession() as session:
+            async with session.get(request_url, params=request_params, headers=self.custom_header) as response:
+                result = await response.json()
+        return result
 
-    def journal(self, issn, only_message=True):
+        # return self.__class__(
+        #     request_url=request_url,
+        #     request_params=request_params,
+        #     context=context,
+        #     etiquette=self.etiquette,
+        #     timeout=self.timeout,
+        # )
+
+    async def journal(self, issn, only_message=True):
         """
-        This method retrieve a json with the given ISSN metadata
+        This method retrieves a JSON object with the given ISSN metadata.
 
         args: Journal ISSN (String)
 
         return: Journal JSON data
-
-        Example:
-            >>> from crossref.restful import Journals
-            >>> journals = Journals()
-            >>> journals.journal('2277-338X')
-            {'last-status-check-time': None, 'counts': None, 'coverage': None,
-            'publisher': 'ScopeMed International Medical Journal Managment and Indexing System',
-            'flags': None, 'breakdowns': None, 'ISSN': ['2320-4664', '2277-338X'],
-            'title': 'International Journal of Medical Science and Public Health'}
         """
         request_url = build_url_endpoint("/".join([self.ENDPOINT, str(issn)]))
         request_params = {}
 
-        result = self.do_http_request(
-            "get",
-            request_url,
-            data=request_params,
-            custom_header=self.custom_header,
-            timeout=self.timeout,
-        )
+        async with aiohttp.ClientSession() as session:
+            async with session.get(request_url, params=request_params) as response:
+                if response.status == 404:
+                    return None
 
-        if result.status_code == 404:
-            return None
+                data = await response.json()
+                return data["message"] if only_message is True else data
 
-        result = result.json()
-
-        return result["message"] if only_message is True else result
-
-    def journal_exists(self, issn):
+    async def journal_exists(self, issn):
         """
-        This method retrieve a boolean according to the existence of a journal
-        in the Crossref database. It returns False if the API results a 404
+        This method retrieves a boolean according to the existence of a journal
+        in the Crossref database. It returns False if the API results in a 404
         status code.
 
         args: Journal ISSN (String)
 
         return: Boolean
-
-        Example 1:
-            >>> from crossref.restful import Journals
-            >>> journals = Journals()
-            >>> journals.journal_exists('2277-338X')
-            True
-
-        Example 2:
-            >>> from crossref.restful import Journals
-            >>> journals = Journals()
-            >>> journals.journal_exists('9999-AAAA')
-            False
         """
         request_url = build_url_endpoint("/".join([self.ENDPOINT, str(issn)]))
         request_params = {}
 
-        result = self.do_http_request(
-            "get",
-            request_url,
-            data=request_params,
-            only_headers=True,
-            custom_header=self.custom_header,
-            timeout=self.timeout,
-        )
+        async with aiohttp.ClientSession() as session:
+            async with session.get(request_url, params=request_params) as response:
+                if response.status == 404:
+                    return False
 
-        if result.status_code == 404:
-            return False
-
-        return True
+                return True
 
     def works(self, issn):
         """
-        This method retrieve a iterable of Works of the given journal.
+        This method retrieves an iterable of Works of the given journal.
 
         args: Journal ISSN (String)
 
@@ -1855,10 +1499,9 @@ class Journals(Endpoint):
 
 
 class Depositor:
-    def __init__( # noqa: PLR0913
+    def __init__(
             self, prefix, api_user, api_key, etiquette=None, use_test_server=False,
     ):
-        self.do_http_request = HTTPRequest(throttle=False).do_http_request
         self.etiquette = etiquette or Etiquette()
         self.custom_header = {"user-agent": str(self.etiquette)}
         self.prefix = prefix
@@ -1870,9 +1513,9 @@ class Depositor:
         subdomain = "test" if self.use_test_server else "doi"
         return f"https://{subdomain}.crossref.org/servlet/{verb}"
 
-    def register_doi(self, submission_id, request_xml):
+    async def register_doi(self, submission_id, request_xml):
         """
-        This method registry a new DOI number in Crossref or update some DOI
+        This method registers a new DOI number in Crossref or updates some DOI
         metadata.
 
         submission_id: Will be used as the submission file name. The file name
@@ -1892,7 +1535,7 @@ class Depositor:
             "login_passwd": self.api_key,
         }
 
-        return self.do_http_request(
+        return await self.do_http_request(
             "post",
             endpoint,
             data=params,
@@ -1901,14 +1544,14 @@ class Depositor:
             timeout=self.timeout,
         )
 
-    def request_doi_status_by_filename(self, file_name, data_type="result"):
+    async def request_doi_status_by_filename(self, file_name, data_type="result"):
         """
-        This method retrieve the DOI requests status.
+        This method retrieves the DOI request status.
 
-        file_name: Used as unique ID to identify a deposit.
+        file_name: Used as a unique ID to identify a deposit.
 
         data_type: [contents, result]
-            contents - retrieve the XML submited by the publisher
+            contents - retrieve the XML submitted by the publisher
             result - retrieve a JSON with the status of the submission
         """
 
@@ -1921,19 +1564,19 @@ class Depositor:
             "type": data_type,
         }
 
-        return self.do_http_request(
+        return await self.do_http_request(
             "get", endpoint, data=params, custom_header=self.custom_header, timeout=self.timeout,
         )
 
-    def request_doi_status_by_batch_id(self, doi_batch_id, data_type="result"):
+    async def request_doi_status_by_batch_id(self, doi_batch_id, data_type="result"):
         """
-        This method retrieve the DOI requests status.
+        This method retrieves the DOI request status.
 
-        file_name: Used as unique ID to identify a deposit.
+        doi_batch_id: Used as a unique ID to identify a batch of deposits.
 
         data_type: [contents, result]
-            contents - retrieve the XML submited by the publisher
-            result - retrieve a XML with the status of the submission
+            contents - retrieve the XML submitted by the publisher
+            result - retrieve an XML with the status of the submission
         """
 
         endpoint = self.get_endpoint("submissionDownload")
@@ -1945,6 +1588,6 @@ class Depositor:
             "type": data_type,
         }
 
-        return self.do_http_request(
+        return await self.do_http_request(
             "get", endpoint, data=params, custom_header=self.custom_header, timeout=self.timeout,
         )
